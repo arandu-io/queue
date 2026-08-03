@@ -1,0 +1,117 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    # A real server, because everything this package does is a claim about a
+    # protocol: SETNX either is atomic or it is not, and a fake that implements
+    # the happy path proves nothing about the case that matters.
+    #
+    # Valkey rather than Redis: same RESP, and it is the fork that stayed open
+    # source. Dragonfly is the recommended default in production and answers the
+    # same protocol -- doc 11.
+    services:
+      kv:
+        image: valkey/valkey:8-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      KV_ADDRESS: 127.0.0.1:6379
+
+    # One job per module: a single job with two `cd`s hides which one broke, and
+    # the whole point of the split is that they fail independently.
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [".", "kv"]
+
+    defaults:
+      run:
+        working-directory: ${{ matrix.module }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # Not go-version-file: go.mod declares the MINIMUM language version
+          # ("go 1.25"), and setup-go installs exactly that -- 1.25.0, whose
+          # standard library carries vulnerabilities fixed in 1.25.11 and later.
+          # govulncheck below is right to fail on it.
+          #
+          # "stable" is the version people actually run, which is what CI should
+          # be testing against. The minimum in go.mod stays where it is.
+          go-version: stable
+
+      # A formatting difference is a failure, not a comment on a pull request.
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: vet
+        run: go vet ./...
+
+      # The race detector is what keeps the per-request Collector honest: it is
+      # shared by every goroutine a request fans out to.
+      - name: test
+        run: go test -race ./...
+
+      # The RESP tests skip without KV_ADDRESS, and a suite that silently skips
+      # is a suite that passes while proving nothing. The table-backed tests run
+      # on SQLite and never skip.
+      - name: the RESP tests actually ran against a server
+        if: matrix.module == 'kv'
+        run: |
+          go test -run TestPushAndReserve -v . | tee /tmp/out
+          if grep -q "SKIP" /tmp/out; then
+            echo "the tests skipped: the service container is not reachable"
+            exit 1
+          fi
+
+      # The reason this repository is split: a project queueing over its own
+      # database must not carry a Redis client.
+      - name: the table-backed module carries no Redis client
+        if: matrix.module == '.'
+        run: |
+          deps=$(go list -deps ./... | grep redis || true)
+          if [ -n "$deps" ]; then
+            echo "a Redis client reached the table-backed module:"
+            echo "$deps"
+            exit 1
+          fi
+
+      - name: no Node
+        run: |
+          found=$(find . -name package.json -o -name node_modules -o -name 'vite.config.*' | grep -v '^./.git' || true)
+          if [ -n "$found" ]; then
+            echo "Node entered the view layer:"
+            echo "$found"
+            exit 1
+          fi
+
+      # Required by doc 24: a known vulnerability blocks the merge rather than
+      # showing up in a report nobody reads.
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...

@@ -1,0 +1,15 @@
+# What this adapter declares about itself.
+
+name = "arandu-io/queue"
+framework = ">= 0.7"
+profiles = ["conventional", "performance"]
+
+[permissions]
+# The table-backed queue talks to the database the application already opened,
+# which is not an outbound call of its own. The RESP driver is a separate module
+# and declares its own.
+network = false
+filesystem = false
+exec = false
+# It owns the jobs table.
+migrations = true
