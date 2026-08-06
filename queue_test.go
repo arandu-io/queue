@@ -4,7 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -397,4 +400,196 @@ func contains(haystack, needle string) bool {
 		}
 	}
 	return false
+}
+
+// TestMaxAttemptsDeliversExactlyThatManyTimes is a bug an audit found: the
+// delivery was counted twice.
+//
+// Reserve increments attempts in the row and returns the job carrying the new
+// count. The worker then added one more, so MaxAttempts of N delivered N-1
+// times -- and MaxAttempts of 2 parked on the first failure, with no retry at
+// all. The in-memory queue the worker tests use did not increment, which is why
+// it never showed up there.
+//
+// This runs the real worker loop against the real driver, where the increment
+// actually happens.
+func TestMaxAttemptsDeliversExactlyThatManyTimes(t *testing.T) {
+	for _, maxAttempts := range []int{2, 3} {
+		t.Run(fmt.Sprintf("max%d", maxAttempts), func(t *testing.T) {
+			s, _ := store(t)
+			push(t, s, "invoice.send")
+
+			var mu sync.Mutex
+			deliveries := 0
+
+			w := jobs.NewWorker(s, jobs.WorkerOptions{
+				Poll:        time.Millisecond,
+				Concurrency: 1,
+				MaxAttempts: maxAttempts,
+				// No wait between attempts: the point is the count, not the timing.
+				Backoff: func(int) time.Duration { return 0 },
+			})
+			w.HandleFunc("invoice.send", func(context.Context, security.Grant, jobs.Job) error {
+				mu.Lock()
+				deliveries++
+				mu.Unlock()
+				return errors.New("the broker refused")
+			})
+
+			ctx, stop := context.WithCancel(context.Background())
+			go func() { _ = w.Run(ctx) }()
+
+			// Wait for the job to park, which is what ends the retries.
+			deadline := time.Now().Add(5 * time.Second)
+			for time.Now().Before(deadline) {
+				parked, err := s.Parked(context.Background(), 10)
+				if err == nil && len(parked) == 1 {
+					break
+				}
+				time.Sleep(2 * time.Millisecond)
+			}
+			stop()
+			// Let the loop notice the cancellation before reading the count.
+			time.Sleep(20 * time.Millisecond)
+
+			mu.Lock()
+			got := deliveries
+			mu.Unlock()
+
+			if got != maxAttempts {
+				t.Errorf("MaxAttempts of %d delivered %d times", maxAttempts, got)
+			}
+
+			parked, err := s.Parked(context.Background(), 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(parked) != 1 {
+				t.Fatalf("%d jobs parked, want 1", len(parked))
+			}
+			if parked[0].Attempts != maxAttempts {
+				t.Errorf("the parked job counted %d attempts, want %d", parked[0].Attempts, maxAttempts)
+			}
+		})
+	}
+}
+
+// TestAJobBeingRunIsNotABacklog is a bug an audit found, and it turned a worker
+// doing its job into an outage.
+//
+// Pending and Oldest counted reserved jobs, so a two-minute handler with a
+// one-minute health threshold made /_arandu/health answer 503 for the whole run
+// -- and a load balancer takes the instance out of rotation for a 503. Reserve
+// always knew that a reserved job is running rather than waiting; the two
+// queries the health check reads did not.
+func TestAJobBeingRunIsNotABacklog(t *testing.T) {
+	s, _ := store(t)
+	ctx := context.Background()
+
+	// Pushed in the past, so it is already "late" by any threshold.
+	j, err := jobs.New(grant(), "", "invoice.send", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j.RunAt = time.Now().Add(-time.Hour)
+	if err := s.Push(ctx, grant(), j); err != nil {
+		t.Fatal(err)
+	}
+
+	if lag, err := s.Oldest(ctx, ""); err != nil || lag < time.Minute {
+		t.Fatalf("before the reserve the job should look late: lag = %s (%v)", lag, err)
+	}
+
+	reserved, err := s.Reserve(ctx, "", 1, time.Minute)
+	if err != nil || len(reserved) != 1 {
+		t.Fatalf("Reserve: %v, %d jobs", err, len(reserved))
+	}
+
+	// A worker is holding it. It is running, not waiting.
+	if lag, err := s.Oldest(ctx, ""); err != nil || lag != 0 {
+		t.Errorf("a job being run reports lag %s (%v) -- the health check would 503", lag, err)
+	}
+	if pending, err := s.Pending(ctx, ""); err != nil || pending != 0 {
+		t.Errorf("a job being run counts as %d pending (%v)", pending, err)
+	}
+}
+
+// TestAnExpiredLeaseIsABacklogAgain is the other side: a worker that died holds
+// nothing, and the job it was running is waiting again. Reporting it as still
+// running is how a stopped worker looks healthy forever.
+func TestAnExpiredLeaseIsABacklogAgain(t *testing.T) {
+	s, _ := store(t)
+	ctx := context.Background()
+
+	j, err := jobs.New(grant(), "", "invoice.send", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j.RunAt = time.Now().Add(-time.Hour)
+	if err := s.Push(ctx, grant(), j); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.Reserve(ctx, "", 1, 50*time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(120 * time.Millisecond)
+
+	if lag, err := s.Oldest(ctx, ""); err != nil || lag < time.Minute {
+		t.Errorf("after the lease expired the job reports lag %s (%v), want the full wait", lag, err)
+	}
+	if pending, err := s.Pending(ctx, ""); err != nil || pending != 1 {
+		t.Errorf("after the lease expired %d jobs are pending (%v), want 1", pending, err)
+	}
+}
+
+// TestAForgedJobIsRefused is an escalation the contract allowed.
+//
+// jobs.New builds a job from the Grant, so what it produces always matches. But
+// Push takes a Job, and a Job is a struct anybody can fill in -- and the worker
+// rebuilds the Grant from the stored row. So a Grant for invoice.view could
+// enqueue a job whose action is invoice.delete, in another tenant, and the
+// handler would run under a SystemGrant carrying both. Every Policy downstream
+// would say yes, because the Grant is legitimate: it was minted from a row
+// nobody checked. Found by audit.
+func TestAForgedJobIsRefused(t *testing.T) {
+	s, _ := store(t)
+	ctx := context.Background()
+
+	pushedBy := security.SystemGrant("invoice.view", tenant)
+
+	t.Run("an action the Grant does not carry", func(t *testing.T) {
+		j, err := jobs.New(pushedBy, "", "invoice.send", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		j.Action = "invoice.delete"
+
+		err = s.Push(ctx, pushedBy, j)
+		if !errors.Is(err, jobs.ErrForged) {
+			t.Fatalf("error = %v, want ErrForged", err)
+		}
+		// And the message says what to do about it.
+		if !strings.Contains(err.Error(), "jobs.New") {
+			t.Errorf("the error does not say how to build a job correctly: %v", err)
+		}
+	})
+
+	t.Run("a tenant the Grant does not carry", func(t *testing.T) {
+		j, err := jobs.New(pushedBy, "", "invoice.send", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		j.TenantID = "22222222-2222-4222-8222-222222222222"
+
+		if err := s.Push(ctx, pushedBy, j); !errors.Is(err, jobs.ErrForged) {
+			t.Fatalf("error = %v, want ErrForged", err)
+		}
+	})
+
+	t.Run("nothing was stored", func(t *testing.T) {
+		if pending, err := s.Pending(ctx, ""); err != nil || pending != 0 {
+			t.Fatalf("%d jobs were stored despite the refusals (%v)", pending, err)
+		}
+	})
 }

@@ -67,10 +67,11 @@ func (*Module) Migrations() []kernel.Migration {
 		// on SQLite, Postgres and MySQL.
 		Up: `
 CREATE TABLE jobs (
-    id             TEXT PRIMARY KEY,
-    queue          TEXT NOT NULL,
+    id             VARCHAR(255) PRIMARY KEY,
+    -- queue is indexed, so VARCHAR rather than TEXT: see data.KeyText.
+    queue          VARCHAR(255) NOT NULL,
     name           TEXT NOT NULL,
-    tenant_id      TEXT NOT NULL,
+    tenant_id      VARCHAR(255) NOT NULL,
     payload        TEXT NOT NULL,
     authorized_by  TEXT NOT NULL,
     action         TEXT NOT NULL,

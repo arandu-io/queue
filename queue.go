@@ -43,16 +43,21 @@ var _ jobs.Queue = (*Store)(nil)
 // for: the job is committed by the same transaction as the row it describes, so
 // it cannot refer to a write that rolled back.
 func (s *Store) Push(ctx context.Context, g security.Grant, j jobs.Job) error {
+	// The job has to match the Grant pushing it. See jobs.Authorized: without
+	// this, the queue is the one way past the authorization the framework exists
+	// to enforce.
+	if err := jobs.Authorized(g, j); err != nil {
+		return err
+	}
 	tenant := data.Tenant(g)
-	if tenant == "" {
-		return jobs.ErrNoTenant
-	}
-	if j.Name == "" {
-		return jobs.ErrNoName
-	}
 
-	runAt := j.RunAt
-	if runAt.IsZero() {
+	// UTC, always. Every other timestamp this package writes is UTC and every
+	// comparison it makes is against time.Now().UTC(), but a RunAt supplied by
+	// the caller kept whatever zone it arrived in -- so a job scheduled from a
+	// UTC-3 machine was stored three hours in the past on an engine that
+	// compares timestamps as text, and ran immediately. Found by audit.
+	runAt := j.RunAt.UTC()
+	if j.RunAt.IsZero() {
 		runAt = time.Now().UTC()
 	}
 	queue := j.Queue
@@ -197,9 +202,20 @@ func (s *Store) Pending(ctx context.Context, queue string) (int, error) {
 	if queue == "" {
 		queue = jobs.DefaultQueue
 	}
+	// A reserved job is running, not waiting. Reserve has always known that --
+	// its WHERE says so -- and these two did not, so a worker doing exactly what
+	// it should looked like a backlog: a two-minute handler with a one-minute
+	// threshold made /_arandu/health answer 503 while the job ran, and a load
+	// balancer took the instance out of rotation for it. Found by audit.
+	//
+	// An expired lease is waiting again, which is why the comparison is against
+	// now rather than a plain IS NULL.
 	var count int
-	err := s.db.QueryRowContext(ctx,
-		`SELECT count(*) FROM jobs WHERE queue = ? AND failed_at IS NULL`, queue).Scan(&count)
+	err := s.db.QueryRowContext(ctx, `
+		SELECT count(*) FROM jobs
+		WHERE queue = ? AND failed_at IS NULL
+		  AND (reserved_until IS NULL OR reserved_until < ?)`,
+		queue, time.Now().UTC()).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("queue: counting %s: %w", queue, err)
 	}
@@ -218,12 +234,15 @@ func (s *Store) Oldest(ctx context.Context, queue string) (time.Duration, error)
 	// ORDER BY ... LIMIT 1 rather than min(run_at): an aggregate loses the
 	// declared type of the column, and SQLite then hands back a string that
 	// will not scan into a time.Time.
+	// The same definition of "waiting" as Pending and Reserve: a reserved job is
+	// running.
 	var oldest time.Time
 	err := s.db.QueryRowContext(ctx, `
 		SELECT run_at FROM jobs
 		WHERE queue = ? AND failed_at IS NULL
+		  AND (reserved_until IS NULL OR reserved_until < ?)
 		ORDER BY run_at
-		LIMIT 1`, queue).Scan(&oldest)
+		LIMIT 1`, queue, time.Now().UTC()).Scan(&oldest)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
 	}

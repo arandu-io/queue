@@ -102,13 +102,11 @@ func (s *Store) key(parts ...string) string {
 
 // Push adds a job.
 func (s *Store) Push(ctx context.Context, g security.Grant, j jobs.Job) error {
+	// The job has to match the Grant pushing it. See jobs.Authorized.
+	if err := jobs.Authorized(g, j); err != nil {
+		return err
+	}
 	tenant := data.Tenant(g)
-	if tenant == "" {
-		return jobs.ErrNoTenant
-	}
-	if j.Name == "" {
-		return jobs.ErrNoName
-	}
 	j.TenantID = tenant
 	if j.Queue == "" {
 		j.Queue = jobs.DefaultQueue
