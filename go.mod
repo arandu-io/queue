@@ -9,7 +9,7 @@ go 1.25.0
 // The RESP driver is github.com/arandu-io/queue/kv, its own module, because in
 // Go there is no optional dependency: carrying go-redis here would put it in the
 // go.sum of every project that only wanted the table.
-require github.com/arandu-io/framework v0.9.0
+require github.com/arandu-io/framework v0.10.0
 
 require modernc.org/sqlite v1.55.0
 
