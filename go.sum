@@ -1,5 +1,5 @@
-github.com/arandu-io/framework v0.10.0 h1:FDNn4TmDDmbNLjDWByRAHVmKStRn7W/7ThSHZTi/x4k=
-github.com/arandu-io/framework v0.10.0/go.mod h1:mI+BwgaqxZh3j6GtnV2VdhUDa8UYgPm8rOcYS82/wyk=
+github.com/arandu-io/framework v0.13.1 h1:IOW0GIWO6RafL+3z35ywbPJzcGUsFzFXbhCCOF7/pTE=
+github.com/arandu-io/framework v0.13.1/go.mod h1:c0r4p08puM7BwQ4NJg4M/Yjf5ECeYeheis0F+j6a7X8=
 github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkpeCY=
 github.com/dustin/go-humanize v1.0.1/go.mod h1:Mu1zIs6XwVuF/gI1OepvI0qD18qycQx+mFykh5fBlto=
 github.com/google/pprof v0.0.0-20250317173921-a4b03ec1a45e h1:ijClszYn+mADRFY17kjQEVQ1XRhq2/JR1M3sGqeJoxs=

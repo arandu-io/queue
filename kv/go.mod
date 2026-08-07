@@ -5,7 +5,7 @@ go 1.25.0
 // Its own module, so a project that queues over its own database does not carry
 // a Redis client in its go.sum, its build and its vulnerability surface.
 require (
-	github.com/arandu-io/framework v0.10.0
+	github.com/arandu-io/framework v0.13.1
 	github.com/redis/go-redis/v9 v9.22.0
 )
 
