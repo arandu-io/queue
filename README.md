@@ -9,6 +9,7 @@
 <a href="LICENSE.md"><img src="https://img.shields.io/github/license/arandu-io/queue" alt="License"></a>
 </p>
 
+
 ## About the queue
 
 The default driver is a table in the application's own database, and that is the
@@ -22,7 +23,7 @@ import _ "github.com/arandu-io/queue/kv"   // the RESP driver, in its own module
 
 Exponential backoff and a dead-letter queue. The worker is the same binary with
 another argument — `aru queue:work` — which keeps a deployment to one artifact
-and stops the worker running a different build from the server.
+and stops a worker from running a different build than the server.
 
 ## Learning Arandu
 
@@ -31,7 +32,7 @@ The API reference is generated from the doc comments and lives on
 symbol carries one, and that is deliberate: it is the documentation that cannot
 drift from the code, because it sits in the same file.
 
-The CLI documents itself — `aru help` lists every command, and each one explains
+The CLI documents itself. `aru help` lists every command, and each one explains
 what it writes and what to do with it. `aru doctor` explains what it found and
 what breaks, not which rule was violated.
 
