@@ -1,47 +1,55 @@
-# queue
+<h1 align="center">arandu-io/queue</h1>
 
-Job queue for [Arandu](https://github.com/arandu-io/framework): work that
-happens after the response, with retry, backoff and a dead letter queue.
+<p align="center">The job queue for Arandu.</p>
 
-The contract lives in the core, in `framework/jobs`. This repository is the two
-default implementations of it.
+<p align="center">
+<a href="https://github.com/arandu-io/queue/actions/workflows/ci.yml"><img src="https://github.com/arandu-io/queue/actions/workflows/ci.yml/badge.svg" alt="Build Status"></a>
+<a href="https://pkg.go.dev/github.com/arandu-io/queue"><img src="https://pkg.go.dev/badge/github.com/arandu-io/queue.svg" alt="Go Reference"></a>
+<a href="https://github.com/arandu-io/queue/tags"><img src="https://img.shields.io/github/v/tag/arandu-io/queue?label=version" alt="Latest Version"></a>
+<a href="LICENSE.md"><img src="https://img.shields.io/github/license/arandu-io/queue" alt="License"></a>
+</p>
 
-```sh
-go get github.com/arandu-io/queue        # over the application's database
-go get github.com/arandu-io/queue/kv     # over RESP
-```
+## About the queue
 
-## Which one
-
-**The table**, unless you have a reason. A job pushed inside
-`data.Transaction` is committed by the same transaction as the row it is about,
-so it cannot refer to a write that rolled back — the outbox guarantee, applied
-to work instead of to events. It also needs nothing installed.
-
-**RESP** when the volume outgrows what a table handles comfortably. Same
-`Worker`, same handlers, one line different in `main` — and no transactional
-guarantee, which is the whole trade.
+The default driver is a table in the application's own database, and that is the
+point: a job pushed inside a transaction is committed by the same transaction as
+the row that produced it. No job for a row that was rolled back, and no row
+without its job.
 
 ```go
-q := queue.New(db)                          // or kvqueue.New(kvqueue.Options{…})
-
-k := kernel.New(cfg).Register(queue.NewModule(q, "default", "mail"))
-
-// pushing, from a service, inside the write:
-j, _ := jobs.New(g, "mail", "invoice.send", invoice.ID)
-_ = q.Push(ctx, g, j)
-
-// draining, in `aru work`:
-jobs.NewWorker(q, jobs.WorkerOptions{Queue: "mail"}).
-    HandleFunc("invoice.send", sendInvoice)
+import _ "github.com/arandu-io/queue/kv"   // the RESP driver, in its own module
 ```
 
-Every job carries the `Grant` that pushed it — tenant, subject and action — and
-the worker reissues the work under exactly that. There is no unauthorized path
-into the database from a worker.
+Exponential backoff and a dead-letter queue. The worker is the same binary with
+another argument — `aru queue:work` — which keeps a deployment to one artifact
+and stops the worker running a different build from the server.
 
-Delivery is at-least-once. A handler that cannot run twice safely is a handler
-with a bug: the process can die between doing the work and acknowledging it,
-and no queue anywhere solves that.
+## Learning Arandu
 
-MIT. See [LICENSE.md](LICENSE.md).
+The API reference is generated from the doc comments and lives on
+[pkg.go.dev](https://pkg.go.dev/github.com/arandu-io/framework). Every exported
+symbol carries one, and that is deliberate: it is the documentation that cannot
+drift from the code, because it sits in the same file.
+
+The CLI documents itself — `aru help` lists every command, and each one explains
+what it writes and what to do with it. `aru doctor` explains what it found and
+what breaks, not which rule was violated.
+
+A guide and a website do not exist yet, and that is a decision rather than a
+gap: a guide written against an API that still moves is work done twice, and the
+second time is worse — there is wrong documentation published. The site is the
+next phase, and it will be an Arandu application.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Before opening a pull request, the three
+commands at the top of that file have to pass, and CI runs exactly them.
+
+## Security Vulnerabilities
+
+Please review [our security policy](SECURITY.md) on how to report a
+vulnerability. Never open a public issue for one.
+
+## License
+
+Open-sourced software licensed under the [MIT license](LICENSE.md).
